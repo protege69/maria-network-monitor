@@ -1,0 +1,57 @@
+name: "Maria Network Monitor"
+version: "1.2.0"
+slug: "maria_network_monitor"
+description: "MikroTik static DHCP monitoring and printer telemetry via MQTT Discovery"
+
+arch:
+  - amd64
+  - aarch64
+
+startup: application
+boot: auto
+init: false
+stage: stable
+
+privileged:
+  - NET_RAW
+
+options:
+  mikrotik_username: "HA_READ"
+  mikrotik_password: null
+
+  mqtt_host: "core-mosquitto"
+  mqtt_port: 1883
+  mqtt_username: "maria_monitor"
+  mqtt_password: null
+
+  state_interval: 60
+  discovery_interval: 600
+  expire_after: 180
+
+  printer_ipp_interval: 60
+  printer_snmp_interval: 600
+  snmp_community: "public"
+
+  sites: []
+
+schema:
+  mikrotik_username: str
+  mikrotik_password: password
+
+  mqtt_host: str
+  mqtt_port: port
+  mqtt_username: str
+  mqtt_password: password
+
+  state_interval: "int(15,3600)"
+  discovery_interval: "int(60,86400)"
+  expire_after: "int(60,86400)"
+
+  printer_ipp_interval: "int(30,3600)"
+  printer_snmp_interval: "int(60,86400)"
+  snmp_community: str
+
+  sites:
+    - name: str
+      router: str
+      lan: "str?"

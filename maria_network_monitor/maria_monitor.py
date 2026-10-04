@@ -12,6 +12,9 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+from dashboard import (NewPrinterDiscovery, discovery_configs, export_assets,
+                       export_dashboard, site_key, update_inventory)
+
 import paho.mqtt.client as mqtt
 import routeros_api
 from pyipp import IPP
@@ -20,6 +23,7 @@ from pyipp import IPP
 OPTIONS_FILE = Path("/data/options.json")
 KNOWN_FILE = Path("/data/known.json")
 PRINTER_CACHE_FILE = Path("/data/printer_cache.json")
+INVENTORY_FILE = Path("/data/dashboard_inventory.json")
 
 DISCOVERY_PREFIX = "homeassistant"
 MQTT_ROOT = "maria-monitor"
@@ -37,6 +41,8 @@ PORTS = {
     515: "lpd",
     554: "rtsp",
     631: "ipp",
+    5060: "sip",
+    5061: "sips",
     8000: "camera_8000",
     8080: "http_8080",
     8291: "winbox",
@@ -89,6 +95,10 @@ def restore_printer_cache():
         PRINTER_CACHE[device_id] = {
             "ipp": item.get("ipp"),
             "snmp": item.get("snmp"),
+            "ipp_observed_at": item.get("ipp_observed_at"),
+            "snmp_observed_at": item.get("snmp_observed_at"),
+            "ipp_fresh": False,
+            "snmp_fresh": False,
 
             # monotonic нельзя сохранять между
             # перезапусками. После старта сразу
@@ -112,6 +122,8 @@ def save_printer_cache():
         data[device_id] = {
             "ipp": item.get("ipp"),
             "snmp": item.get("snmp"),
+            "ipp_observed_at": item.get("ipp_observed_at"),
+            "snmp_observed_at": item.get("snmp_observed_at"),
         }
 
     save_json(
@@ -915,6 +927,9 @@ def enrich_printer_telemetry(
                     and ipp_result.get("ok")
                 ):
                     cache["ipp"] = ipp_result
+                    cache["ipp_observed_at"] = time.time()
+
+                cache["ipp_fresh"] = bool(ipp_result and ipp_result.get("ok"))
 
                 cache["ipp_at"] = now
 
@@ -930,6 +945,9 @@ def enrich_printer_telemetry(
                     and snmp_result.get("ok")
                 ):
                     cache["snmp"] = snmp_result
+                    cache["snmp_observed_at"] = time.time()
+
+                cache["snmp_fresh"] = bool(snmp_result and snmp_result.get("ok"))
 
                 cache["snmp_at"] = now
 
@@ -947,6 +965,16 @@ def enrich_printer_telemetry(
             cache.get("ipp"),
             cache.get("snmp"),
         )
+        for field in ("ipp_observed_at", "snmp_observed_at", "ipp_fresh", "snmp_fresh"):
+            device["printer"][field] = cache.get(field)
+        # Last-good values survive failures; freshness is independent of value.
+        device["printer"]["ipp_fresh"] = bool(
+            device.get("online") and cache.get("ipp_fresh")
+            and "ipp" in device.get("open_ports", {})
+            and now - cache.get("ipp_at", 0) <= ipp_interval * 2)
+        device["printer"]["snmp_fresh"] = bool(
+            device.get("online") and cache.get("snmp_fresh")
+            and now - cache.get("snmp_at", 0) <= snmp_interval * 2)
 
     save_printer_cache()
 
@@ -1002,7 +1030,7 @@ def classify_device(name, hostname, ports):
         return "camera"
 
     # VoIP
-    if any(
+    if {"sip", "sips"} & set(ports) or any(
         token in text
         for token in (
             "voip",
@@ -2306,6 +2334,34 @@ def main():
             "MikroTik in the app configuration."
         )
 
+    # Legacy router MQTT IDs remain unchanged; ambiguous legacy IDs fail clearly.
+    slugs = [site_slug(site["name"]) for site in sites]
+    if len(set(slugs)) != len(slugs):
+        raise SystemExit("Site names must have distinct legacy ASCII slugs. "
+                         "Existing MQTT identifiers are preserved; see DOCS.md.")
+
+    dashboard_enabled = bool(options.get("dashboard_enabled", True))
+    inventory = load_json(INVENTORY_FILE, {"sites": {}}) or {"sites": {}}
+    dashboard_topics = set()
+    printer_topics = set()
+    if dashboard_enabled:
+        # Always keep a portable fallback, independently of the HA config mount.
+        for directory in (Path("/data/dashboard"), Path("/share/maria_network_monitor"),
+                          Path("/homeassistant/maria_network_monitor")):
+            if directory.parts[1] == "homeassistant" and not Path("/homeassistant").is_dir():
+                continue
+            if directory.parts[1] == "share" and not Path("/share").is_dir():
+                continue
+            try:
+                export_dashboard(sites, directory)
+                if directory.parts[1] == "homeassistant":
+                    export_assets(Path("/homeassistant/www/maria_network_monitor"))
+                else:
+                    export_assets(directory)
+                log("Dashboard files ready: " + str(directory))
+            except (OSError, ValueError) as exc:
+                log("Dashboard export unavailable; monitoring continues: " + str(exc))
+
     state_interval = int(
         options.get(
             "state_interval",
@@ -2406,6 +2462,15 @@ def main():
         expire_after,
     )
 
+    if dashboard_enabled:
+        configured_site_keys = {site_key(site["name"]) for site in sites}
+        for old_key, old_site in inventory.get("sites", {}).items():
+            if old_key not in configured_site_keys:
+                # Clean only Maria's additive summaries, never user dashboards.
+                for topic, _ in discovery_configs(old_site, expire_after):
+                    client.publish(topic, "", qos=1, retain=True)
+                client.publish(f"{MQTT_ROOT}/dashboard/{old_key}/state", "", qos=1, retain=True)
+
     last_discovery = 0.0
 
     log(
@@ -2456,6 +2521,13 @@ def main():
         enrich_devices(
             devices
         )
+
+        previous_types = {item["id"]: item.get("type", "unknown")
+                          for saved_site in inventory.get("sites", {}).values()
+                          for item in saved_site.get("devices", [])}
+        for device in devices:
+            if device["type"] == "unknown" and device["id"] in previous_types:
+                device["type"] = previous_types[device["id"]]
 
         enrich_printer_telemetry(
             devices,
@@ -2544,7 +2616,7 @@ def main():
                         )
 
                         publish_printer_discovery(
-                            client,
+                            NewPrinterDiscovery(client, printer_topics),
                             device,
                             expire_after,
                         )
@@ -2565,6 +2637,8 @@ def main():
                         client,
                         old_id,
                     )
+                    printer_topics.difference_update(
+                        topic for topic in list(printer_topics) if f"/{old_id}/" in topic)
 
                     log(
                         f"{site_name}: "
@@ -2607,6 +2681,25 @@ def main():
                 client,
                 device,
             )
+
+            # New metrics can arrive after the lease's initial discovery.
+            # Forward only previously unseen config topics to avoid flapping.
+            publish_printer_discovery(
+                NewPrinterDiscovery(client, printer_topics), device, expire_after)
+
+        # This layer never controls existing discovery topics or HA dashboards.
+        inventory = update_inventory(inventory, results)
+        try:
+            save_json(INVENTORY_FILE, inventory)
+        except OSError as exc:
+            log("Inventory save failed; monitoring continues: " + str(exc))
+        if dashboard_enabled:
+            for saved_site in inventory["sites"].values():
+                for topic, config in discovery_configs(saved_site, expire_after):
+                    if topic not in dashboard_topics:
+                        mqtt_json(client, topic, config)
+                        dashboard_topics.add(topic)
+                mqtt_json(client, f"{MQTT_ROOT}/dashboard/{saved_site['site_id']}/state", saved_site)
 
         # heartbeat нашего монитора
 

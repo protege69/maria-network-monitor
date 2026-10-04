@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.3.0
+
+- Explicitly group SIP/SIPS phones under VoIP, using name/hostname hints and TCP 5060/5061 where available; PBX registration status is not inferred from reachability.
+
+- Added one generated Maria Network Monitor YAML dashboard, an overview of all sites, and a Sections view per site.
+- Added a local reactive frontend module: new static leases update visible device lists without manual card creation or dashboard refresh.
+- Added persistent dashboard inventory, stable view IDs, offline type persistence, site summary MQTT sensors, and stale-data handling after RouterOS/API or monitor failures.
+- Added compact printer cards with lifetime page counters, status/queue/acceptance, supply bars, IPP/SNMP timestamps, and SNMP-only drum/waste supplementation in the UI model.
+- Toner at or below 20% warns; waste toner is never interpreted as bad merely because its percentage is low. Each faulty printer is counted once.
+- Preserved existing MQTT device IDs, discovery topics, cache and no-periodic-discovery-flapping behavior. Printer metrics arriving after initial discovery now publish only new entity topics. Missing telemetry no longer causes printer marker tombstones; removing a managed lease still removes its entities.
+- Added owned-file, atomic and idempotent export into the HA config mount, shared fallback and app data. No writes to user dashboards, configuration.yaml or .storage.
+- Added one-time dashboard/resource connection instructions, architecture/reporting notes, synthetic regression tests and a standalone desktop/mobile preview.
+- Clarified that lifetime counters are not daily printing totals; automatic daily reports remain future work.
+
 ## 1.2.0
 
 - Prepared the app for installation from a Home Assistant App repository.

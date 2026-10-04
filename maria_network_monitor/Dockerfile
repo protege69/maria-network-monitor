@@ -22,6 +22,8 @@ RUN apk add --no-cache \
 WORKDIR /app
 
 COPY maria_monitor.py /app/maria_monitor.py
+COPY dashboard.py /app/dashboard.py
+COPY frontend /app/frontend
 COPY run.sh /run.sh
 
 RUN chmod a+x /run.sh

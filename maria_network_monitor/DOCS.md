@@ -1,5 +1,11 @@
 # Maria Network Monitor — configuration
 
+## Automatic dashboard (1.3.0)
+
+See [DASHBOARD.md](DASHBOARD.md) for one-time connection, automatic device updates, mobile layout, ownership guarantees and fallback YAML. `dashboard_enabled` defaults to `true`; setting it to `false` leaves legacy monitoring active and stops dashboard publication/export. Existing registered dashboards are not deleted.
+
+See [../ARCHITECTURE.md](../ARCHITECTURE.md) for data quality and the future reporting architecture. The current page count is a lifetime reading, not a daily report.
+
 ## What it does
 
 - Connects to one or more MikroTik routers through RouterOS API (TCP 8728).
@@ -52,11 +58,14 @@ snmp_community: public
 
 sites:
   - name: Office
-    router: 10.10.0.1
-    lan: 192.168.10.0/24
+    router: 192.0.2.1
+    lan: 192.0.2.0/24
   - name: Branch
-    router: 10.10.0.2
+    router: 198.51.100.1
+    lan: 198.51.100.0/24
 ```
+
+These are documentation-only addresses and fictional site names. Replace them only in your local app options.
 
 ### `sites[].lan`
 

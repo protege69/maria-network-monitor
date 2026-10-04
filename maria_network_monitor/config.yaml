@@ -1,5 +1,5 @@
 name: "Maria Network Monitor"
-version: "1.2.0"
+version: "1.3.0"
 slug: "maria_network_monitor"
 description: "MikroTik static DHCP monitoring and printer telemetry via MQTT Discovery"
 
@@ -12,10 +12,19 @@ boot: auto
 init: false
 stage: stable
 
+map:
+  - type: homeassistant_config
+    read_only: false
+    path: /homeassistant
+  - type: share
+    read_only: false
+    path: /share
+
 privileged:
   - NET_RAW
 
 options:
+  dashboard_enabled: true
   mikrotik_username: "HA_READ"
   mikrotik_password: null
 
@@ -35,6 +44,7 @@ options:
   sites: []
 
 schema:
+  dashboard_enabled: "bool?"
   mikrotik_username: str
   mikrotik_password: password
 

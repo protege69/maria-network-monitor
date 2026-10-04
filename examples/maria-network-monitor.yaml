@@ -21,6 +21,24 @@
       ]
     },
     {
+      "title": "Отчёт за день",
+      "path": "daily",
+      "type": "sections",
+      "max_columns": 3,
+      "sections": [
+        {
+          "type": "grid",
+          "column_span": 3,
+          "cards": [
+            {
+              "type": "custom:maria-network-card",
+              "mode": "report"
+            }
+          ]
+        }
+      ]
+    },
+    {
       "title": "Demo branch",
       "path": "demo-branch-47d49225a419",
       "type": "sections",
@@ -33,6 +51,22 @@
             {
               "type": "custom:maria-network-card",
               "mode": "summary",
+              "site_id": "demo-branch-47d49225a419"
+            }
+          ]
+        },
+        {
+          "type": "grid",
+          "column_span": 2,
+          "cards": [
+            {
+              "type": "custom:maria-network-card",
+              "mode": "report",
+              "site_id": "demo-branch-47d49225a419"
+            },
+            {
+              "type": "custom:maria-network-card",
+              "mode": "history",
               "site_id": "demo-branch-47d49225a419"
             }
           ]
@@ -150,6 +184,22 @@
             {
               "type": "custom:maria-network-card",
               "mode": "summary",
+              "site_id": "demo-warehouse-fa38f6a0b1f2"
+            }
+          ]
+        },
+        {
+          "type": "grid",
+          "column_span": 2,
+          "cards": [
+            {
+              "type": "custom:maria-network-card",
+              "mode": "report",
+              "site_id": "demo-warehouse-fa38f6a0b1f2"
+            },
+            {
+              "type": "custom:maria-network-card",
+              "mode": "history",
               "site_id": "demo-warehouse-fa38f6a0b1f2"
             }
           ]

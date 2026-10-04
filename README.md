@@ -14,7 +14,7 @@ It builds a managed network inventory from MikroTik static DHCP leases, publishe
 
 See [`maria_network_monitor/DOCS.md`](maria_network_monitor/DOCS.md) for configuration details.
 
-## 1.3.0 dashboard
+## 1.4.0 dashboard
 
 One **Maria Network Monitor** dashboard provides a site overview and one responsive view per site. A bundled local resource renders static-lease inventory automatically, including compact printer telemetry and supply warnings. One-time registration is documented in [DASHBOARD.md](maria_network_monitor/DASHBOARD.md). No HACS dependencies or edits to user dashboards are required.
 
@@ -25,3 +25,6 @@ Run offline checks with `python -m unittest discover -s tests -v` and `node test
 ## Security
 
 Do not commit real RouterOS passwords, MQTT passwords, SNMP private communities, VPN keys, or `/data` runtime files to this repository.
+
+
+Version 1.4.0 adds daily print reports, explicit history and outage resilience. See [upgrade and report rules](maria_network_monitor/REPORTS.md).

@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+*.tar.gz
+*.zip
+.DS_Store
+/data/
+options.json
+known.json
+printer_cache.json
+dashboard_inventory.json
+*.tmp

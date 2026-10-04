@@ -1,4 +1,4 @@
-# Maria Network Monitor 1.3.0 — architecture
+# Maria Network Monitor 1.4.0 — architecture
 
 Maria is a network telemetry collector. Home Assistant is its first presentation and history consumer; dashboards do not own the monitoring or reporting rules.
 
@@ -14,7 +14,7 @@ Home Assistant history                additive MQTT site summaries / inventory
                               one YAML dashboard + reactive local cards
 ```
 
-`maria_monitor.py` keeps existing device identities/topics, transport, schedules and cache. `dashboard.py` adds a versioned inventory model, site summary sensors, fault interpretation and owned-file export. The frontend renders inventory from HA states and resolves actual MQTT entity IDs through the HA entity registry only when opening history. It never derives entity IDs from DHCP comments or assumes a user has not renamed an entity.
+`maria_monitor.py` keeps existing device identities/topics and cache; router scheduling now uses bounded waits and retry backoff. `dashboard.py` adds a versioned inventory model, site summary sensors, fault interpretation and owned-file export. The frontend renders inventory from HA states and resolves actual MQTT entity IDs through the HA entity registry only when opening history. It never derives entity IDs from DHCP comments or assumes a user has not renamed an entity.
 
 The reference dashboard was a layout example from another organization, not production configuration. Its site names, device names, entity IDs and addresses are not copied into this repository.
 
@@ -45,18 +45,21 @@ The generator uses stable ordering, a fixed output filename and an ownership hea
 
 The fallback is a ready YAML file and module in `/share/maria_network_monitor` and `/data/dashboard`. The shared copy is easy to retrieve through Samba or a file editor supporting `/share`. Once the YAML dashboard and resource are connected, normal device updates are automatic. The registration itself is a documented one-time setup because no documented public REST dashboard-management endpoint was found.
 
-## Statistics and future reports
+## Statistics and daily reports
 
-The current release exposes lifetime printer counters and time series of online/offline/problem counts. Existing page-counter sensors retain `total_increasing`, supporting HA Recorder statistics where the source is a valid lifetime counter. It does **not** label a lifetime reading as pages printed today or create daily reports yet.
+Lifetime printer counter entities retain `total_increasing` and their original IDs. `reports.py` separately computes daily deltas from source-tagged, timestamped observations and persists a bounded 90-day journal. The frontend offers per-site and fleet reports, date selection and CSV export. Reset, source-change, incomplete-day and no-sample flags are part of the data contract, not visual guesses. Cross-midnight deltas remain explicitly unallocated.
 
-A future reporting layer should use a metric contract: device/site ID, metric name, source, unit, successful observation time, quality and lifetime/reset semantics. Additional RouterOS resource/interface metrics can then be collected without changing the GUI/inventory contract.
-
-Daily page reports must compute increments from valid fresh observations, retain a restart-safe baseline, detect counter resets/device replacement and choose a configured reporting timezone. Missing polls spanning midnight cannot establish the exact day of printing: reports must flag incomplete coverage rather than distribute pages with false precision. Distinguish calendar-day totals, previous calendar day and rolling 24 hours. SNMP lifetime page counters and IPP job/session counters must not be treated as interchangeable without validating the printer's semantics. Preserve source changes explicitly.
-
-For a manually configured prototype HA Utility Meter can accumulate a valid counter by calendar cycle. For automatic reporting across arbitrary discovered printers, add a collector-owned aggregation/export layer or an HA integration that manages those entities; do not automatically rewrite HA configuration for every printer. CSV and management summaries can consume the same aggregates later.
-
-Inventory attributes are current operational data and can be large. Exclude the inventory entities from Recorder after finding their real entity IDs, while retaining the numeric summary and page-counter sensors. For very large sites, split inventory into metadata plus per-device snapshots in a later schema; there is no universal fleet-size limit established by these offline tests.
+Detailed state history comes from HA Recorder through a native history card. Diagnostic inventory/report attributes can be excluded from Recorder while retaining numeric counters and connectivity states. Future RouterOS resource/interface metrics can use the same observation/source/quality contract.
 
 ## Validation scope
 
 Synthetic regression tests cover legacy identities, static-only inventory, cache survival, delayed printer discovery, idempotent export, foreign-file protection, stale sites, count semantics, warning boundaries and new devices without YAML edits. A standalone preview exercises the exact frontend module with synthetic HA states, desktop/mobile layout and simulated new leases/outages. It is not a live Supervisor/Docker/MQTT installation test; an on-device smoke test remains necessary before production rollout.
+
+
+## Reliability and persistence in 1.4.0
+
+`reports.py` maintains a versioned, atomic `/data/daily_reports.json` ledger. Samples identify their source and observation timestamp. Each site/printer has a baseline and bounded daily buckets; duplicate or out-of-order samples do not affect totals. Midnight-crossing deltas are kept separately, resets/source changes invalidate comparisons, and missing data stays unknown. Timezone is explicit or inherited from TZ; changing an existing ledger timezone requires a deliberate migration, never silent relabeling.
+
+`resilience.py` confirms lease absence before removal and holds at most one outstanding router poll per site. A shared worker pool has a bounded collection wait and exponential retry backoff. This is a cycle waiting budget, not a process hard-kill deadline. Snapshot entities intentionally do not expire or inherit MQTT availability: the UI computes freshness from their observation timestamp; numeric live sensors retain availability/expiry.
+
+The frontend includes a daily report view and a per-site native HA history graph. Reports are independent of Recorder retention; native detailed state history still depends on Recorder. The MQTT queue is bounded, and rejected config publication schedules recovery. Config messages are sent on initial/recovery/new-metric events, not unconditionally each cycle.

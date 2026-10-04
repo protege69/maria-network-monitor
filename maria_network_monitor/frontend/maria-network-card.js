@@ -8,7 +8,19 @@ const format = value => value == null ? "—" : typeof value === "number"
   ? value.toLocaleString("ru-RU") : String(value);
 const statusText = value => ({idle: "Готов", processing: "Печатает", stopped: "Остановлен",
   3: "Готов", 4: "Печатает", 5: "Остановлен"}[String(value)] || format(value));
+const qualityLabels = {partial_start:"Наблюдение начато в этот день", source_changed:"Сменился источник счётчика",
+  counter_reset:"Счётчик сброшен или заменён", boundary_gap:"Есть интервал через полночь",
+  no_samples:"Нет показаний", stale:"Давно не было показаний", partial_end:"Нет показаний на конец дня"};
 const style = `
+ .controls {display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:12px 0}
+ select,button.action {font:inherit;font-size:13px;color:var(--primary-text-color);background:var(--card-background-color,#fff);border:1px solid var(--divider-color,#ddd);border-radius:8px;padding:9px;max-width:100%}
+ button.action {cursor:pointer} .report-list {display:grid;gap:10px;margin:14px 0}
+ .report-row {padding:12px;border:1px solid var(--divider-color,#ddd);border-radius:10px;overflow-wrap:anywhere}
+ .report-row .row {align-items:center} .bars {display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:7px;margin:18px 0}
+ .bar-day {text-align:center;font-size:11px;min-width:0} .bar-space {height:70px;display:flex;align-items:flex-end;justify-content:center;margin:5px 0}
+ .bar-value {width:65%;background:var(--primary-color,#00897b);border-radius:4px 4px 0 0;min-height:2px}
+ .history-host {margin-top:12px} .report-total {font-size:30px;font-weight:600}
+
  :host {display:block; color:var(--primary-text-color); font-family:var(--paper-font-body1_-_font-family, sans-serif)}
  * {box-sizing:border-box} ha-card {display:block; padding:18px; border-radius:var(--ha-card-border-radius,12px)}
  h2,h3,p {margin:0} h2 {font-size:20px; font-weight:600} h3 {font-size:15px; font-weight:600}
@@ -55,9 +67,16 @@ function icon(name) {
   return node;
 }
 export function inventories(hass) {
+  const reports = Object.values(hass.states || {}).filter(s => s.attributes?.maria_role === "daily_report");
   return Object.values(hass.states || {}).filter(state =>
     state.attributes?.maria_role === "site_inventory" && state.attributes.schema === 1)
-    .map(state => ({...state.attributes, monitor_available: !["unavailable", "unknown"].includes(state.state)}))
+    .map(state => {
+      const age = (Date.now() - Date.parse(state.attributes.observed_at)) / 1000;
+      return {...state.attributes,
+        daily_report: reports.find(r => r.attributes.site_id === state.attributes.site_id)?.attributes,
+        monitor_available: !["unavailable", "unknown"].includes(state.state) &&
+          (!state.attributes.observed_at || (Number.isFinite(age) && age <= (state.attributes.freshness_seconds || 180) && age >= -60))};
+    })
     .sort((a, b) => a.name.localeCompare(b.name, "ru"));
 }
 export function devicesFor(site, group) {
@@ -72,8 +91,8 @@ class MariaNetworkCard extends HTMLElement {
     this.attachShadow({mode: "open"});
   }
   setConfig(config) {
-    if (!["overview", "summary", "group"].includes(config.mode)) throw Error("Maria: invalid card mode");
-    if (config.mode !== "overview" && !config.site_id) throw Error("Maria: site_id required");
+    if (!["overview", "summary", "group", "history", "report"].includes(config.mode)) throw Error("Maria: invalid card mode");
+    if (! ["overview", "report"].includes(config.mode) && !config.site_id) throw Error("Maria: site_id required");
     this.config = {...config};
     this.fingerprint = null;
     if (this._hass) this.render();
@@ -81,14 +100,19 @@ class MariaNetworkCard extends HTMLElement {
   set hass(hass) {
     this._hass = hass;
     if (!this.config) return;
+    if (this.historyCard) this.historyCard.hass = hass;
     const all = inventories(hass);
-    const relevant = this.config.mode === "overview" ? all : all.filter(site => site.site_id === this.config.site_id);
+    const relevant = !this.config.site_id ? all : all.filter(site => site.site_id === this.config.site_id);
     const signature = JSON.stringify(relevant);
     if (signature !== this.fingerprint) {
       this.fingerprint = signature;
       this.render(relevant);
     }
   }
+  connectedCallback() {
+    if (!this.timer) this.timer = setInterval(() => { if (this._hass) this.hass = this._hass; }, 30000);
+  }
+  disconnectedCallback() { clearInterval(this.timer); this.timer = null; }
   getCardSize() { return this.config?.mode === "summary" ? 3 : 6; }
   getGridOptions() { return {columns: "full", rows: "auto"}; }
   async moreInfo(uniqueId) {
@@ -104,7 +128,7 @@ class MariaNetworkCard extends HTMLElement {
     }
   }
   tile(name, value, device, uid, image, connection = false) {
-    const unknown = this.currentStale;
+    const unknown = this.currentStale || device.stale;
     const stateClass = connection ? unknown ? "stale" : device.online ? "online" : "offline" : "";
     const tile = element("div", null, "tile " + stateClass);
     const badge = element("span", null, "badge"); badge.append(icon(image)); tile.append(badge);
@@ -130,6 +154,7 @@ class MariaNetworkCard extends HTMLElement {
     if (stale) card.append(element("p", "Нет актуального опроса. Сохранено устройств: " + format(site.total) + ".", "notice"));
     else card.append(element("p", "Устройств: " + format(site.total), "notice"));
     if (site.last_success_at) card.append(element("p", "Последний опрос: " + new Date(site.last_success_at).toLocaleString("ru-RU"), "notice"));
+    if (site.inventory_pending) card.append(element("p", "Подтверждаем отсутствие DHCP-записей; устройства пока сохранены.", "notice"));
     if (navigate) {
       const link = element("a", "Открыть оборудование →");
       // Relative view URL keeps dashboard independent of the HA host/path.
@@ -178,7 +203,113 @@ class MariaNetworkCard extends HTMLElement {
     if (this.currentStale || !device.online || !data.ipp_fresh || !data.snmp_fresh)
       card.append(element("p", "Часть телеметрии может быть последней известной. IPP: " +
         this.observed(data.ipp_observed_at) + "; SNMP: " + this.observed(data.snmp_observed_at), "notice"));
-    card.append(element("p", "История счётчика — по нажатию на «Всего страниц».", "notice"));
+    card.append(element("p", "Графики доступны в разделе «История» выше; нажмите «Всего страниц» для подробностей.", "notice"));
+    return card;
+  }
+  report(sites) {
+    const card = element("ha-card"); card.append(element("h2", "Отчёт за день"));
+    const reports = sites.filter(s => s.daily_report);
+    const dates = [...new Set(reports.flatMap(s => s.daily_report.days.map(d => d.date)))].sort().reverse();
+    if (!reports.length || !dates.length) {
+      card.append(element("p", "Отчёт появится после первого обнаружения принтера. Прошлые дни не заполняются вымышленными данными.", "notice")); return card;
+    }
+    const selectedDate = dates.includes(this.reportDate) ? this.reportDate : dates[0];
+    const controls = element("div", null, "controls");
+    const select = element("select"); select.setAttribute("aria-label", "Дата отчёта");
+    for (const date of dates) { const option = element("option", date); option.value = date; select.append(option); }
+    select.value = selectedDate;
+    select.addEventListener("change", () => {this.reportDate = select.value; this.render();});
+    controls.append(select, element("span", "Часовой пояс: " + reports[0].daily_report.timezone, "small")); card.append(controls);
+    const rows = reports.flatMap(site => (site.daily_report.days.find(d => d.date === selectedDate)?.rows || []).map(r => ({...r, site:site.name})));
+    const hasSamples = rows.some(r => r.pages != null);
+    const total = rows.reduce((sum, r) => sum + (r.pages || 0), 0);
+    card.append(element("div", hasSamples ? format(total) : "—", "report-total"), element("p", "Подтверждено страниц за выбранный день", "small"));
+    if (!this.config.site_id) {
+      const subtotals = element("div", null, "report-list");
+      for (const site of sites) {
+        const day = site.daily_report?.days.find(d => d.date === selectedDate);
+        const row = element("div", null, "row");
+        row.append(element("span", site.name), element("strong", day?.has_samples ? format(day.pages) + " стр." : "Нет данных"));
+        subtotals.append(row);
+      }
+      card.append(subtotals);
+    }
+    const isToday = reports.some(s => new Intl.DateTimeFormat("sv-SE", {timeZone:s.daily_report.timezone}).format(new Date()) === selectedDate);
+    card.append(element("p", isToday ? "Текущий день · итог обновляется по мере опроса." : "Архивный день · смотрите отметки полноты ниже.", "notice"));
+    if (reports.some(s => !s.monitor_available)) card.append(element("p", "Монитор не присылает свежие данные. Показан сохранённый отчёт.", "alert"));
+    if (reports.some(s => Date.now()/1000 - s.daily_report.generated_at > (s.freshness_seconds || 180))) card.append(element("p", "Отчёт давно не обновлялся. Дата и значения соответствуют последней сохранённой версии.", "alert"));
+    if (reports.some(s => s.daily_report.persistence_ok === false)) card.append(element("p", "Не удалось сохранить отчёт на диск. После перезапуска возможна потеря новых показаний.", "alert"));
+    if (sites.some(s => !s.daily_report)) card.append(element("p", "Для части филиалов отчёт ещё не получен; общий итог неполный.", "alert"));
+    const recent = dates.slice(0, 7).reverse().map(date => ({date, pages:reports.reduce((n,s) => n + (s.daily_report.days.find(d => d.date === date)?.pages || 0),0),
+      available:reports.some(s => s.daily_report.days.find(d => d.date === date)?.has_samples)}));
+    const maximum = Math.max(1, ...recent.map(d => d.pages));
+    const bars = element("div", null, "bars");
+    for (const day of recent) {
+      const column = element("div", null, "bar-day"), space = element("div", null, "bar-space"), bar = element("div", null, "bar-value");
+      bar.style.height = (day.pages / maximum * 100) + "%"; if (day.available) space.append(bar);
+      column.append(element("span", day.available ? format(day.pages) : "—"), space, element("span", day.date.slice(5))); bars.append(column);
+    }
+    card.append(bars);
+    const list = element("div", null, "report-list");
+    for (const row of rows) {
+      const item = element("div", null, "report-row"), heading = element("div", null, "row");
+      heading.append(element("strong", row.name), element("strong", row.pages == null ? "Нет данных" : format(row.pages) + " стр."));
+      item.append(heading, element("div", row.site, "small"));
+      if (row.flags.length) item.append(element("p", row.flags.map(f => qualityLabels[f] || f).join(" · "), "alert"));
+      if (row.unallocated) item.append(element("p", "Ещё " + format(row.unallocated) + " стр. не распределено по дням: " + this.observed(row.gap_from) + " — " + this.observed(row.gap_to), "notice"));
+      if (row.last_at) item.append(element("div", "Последнее показание: " + this.observed(row.last_at), "small"));
+      list.append(item);
+    }
+    card.append(list);
+    const csv = element("button", "Скачать CSV", "action"); csv.type = "button";
+    csv.addEventListener("click", () => {
+      const quote = v => '"' + String(v ?? "").replaceAll('"', '""').replace(/^(\s*[=+@-])/, "'$1") + '"';
+      const lines = [["Дата", "Часовой пояс", "Филиал", "Принтер", "Подтверждено страниц", "Не распределено", "Интервал от UTC", "Интервал до UTC", "Качество"],
+        ...rows.map(r => [selectedDate,reports[0].daily_report.timezone,r.site,r.name,r.pages,r.unallocated,
+          r.gap_from ? new Date(r.gap_from*1000).toISOString() : "",r.gap_to ? new Date(r.gap_to*1000).toISOString() : "",
+          r.flags.map(f => qualityLabels[f] || f).join("; ")])];
+      const url = URL.createObjectURL(new Blob(["\ufeff" + lines.map(r => r.map(quote).join(";")).join("\r\n")], {type:"text/csv;charset=utf-8"}));
+      const link = element("a"); link.href = url; link.download = "maria-print-" + selectedDate + ".csv"; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+    });
+    card.append(csv, element("p", "Считаются только разницы показаний внутри дня. Прирост через полночь, сбросы и пропуски отмечаются отдельно. Первый день наблюдения неполный.", "notice"));
+    return card;
+  }
+  history(site) {
+    const card = element("ha-card"); card.append(element("h2", "История"));
+    const controls = element("div", null, "controls"), select = element("select"); select.setAttribute("aria-label", "Устройство и показатель истории");
+    const options = (site.devices || []).flatMap(d => [
+      ...(d.type === "printer" ? [{uid:d.id + "_page_count", label:d.name + " · счётчик страниц"}] : []),
+      {uid:d.online_unique_id,label:d.name + " · связь"}]);
+    if (site.router_unique_id) options.unshift({uid:site.router_unique_id,label:"MikroTik · доступность API"});
+    for (const [suffix,label] of [["online","Устройств на связи"],["offline","Устройств офлайн"],["printer_problems","Проблемных принтеров"]])
+      options.push({uid:"maria_dashboard_"+site.site_id+"_"+suffix,label});
+    if (!options.length) {card.append(element("p", "История появится после обнаружения устройств.", "notice"));return card;}
+    if (!options.some(o => o.uid === this.historyUid)) this.historyUid = options[0].uid;
+    for (const entry of options) {const option = element("option", entry.label); option.value = entry.uid; select.append(option);}
+    select.value = this.historyUid;
+    const button = element("button", "Показать график · 24 часа", "action"); button.type = "button";
+    const detail = element("button", "Подробнее и другие даты", "action"); detail.type = "button";
+    const host = element("div", null, "history-host");
+    this.historyHost = host;
+    const show = async () => {
+      const uid = this.historyUid; host.replaceChildren(element("p", "Загрузка истории…", "notice"));
+      try {
+        const registry = await this._hass.callWS({type:"config/entity_registry/list"});
+        const entry = registry.find(e => e.platform === "mqtt" && e.unique_id === uid);
+        if (!entry) throw Error("entity_missing");
+        const helpers = await window.loadCardHelpers();
+        const graph = helpers.createCardElement({type:"history-graph",title:"Последние 24 часа",hours_to_show:24,entities:[entry.entity_id]});
+        graph.hass = this._hass;
+        if (this.historyUid !== uid) return;
+        this.historyCard = graph; this.historyCardUid = uid; this.historyHost.replaceChildren(graph);
+      } catch (error) {host.replaceChildren(element("p", "История пока недоступна. Проверьте наличие сущности и интеграции Recorder/History. Можно открыть подробности кнопкой выше.", "notice"));}
+    };
+    select.addEventListener("change", () => {this.historyUid = select.value; this.historyCard = null; show();});
+    button.addEventListener("click", show); detail.addEventListener("click", () => this.moreInfo(this.historyUid));
+    controls.append(select, button, detail); card.append(controls, host);
+    if (this.historyCard && this.historyCardUid === this.historyUid) host.append(this.historyCard);
+    else host.append(element("p", "Выберите показатель и нажмите «Показать график». История сохраняется Home Assistant и доступна при отсутствии связи с устройством.", "notice"));
+    if (window.loadCardHelpers && !this.historyRequested) {this.historyRequested = true; show();}
     return card;
   }
   observed(time) { return time ? new Date(time * 1000).toLocaleString("ru-RU") : "нет успешного опроса"; }
@@ -186,6 +317,9 @@ class MariaNetworkCard extends HTMLElement {
     const root = this.shadowRoot;
     root.replaceChildren(element("style", style));
     const selected = sites.find(site => site.site_id === this.config.site_id);
+    if (this.config.mode === "report") {
+      root.append(this.report(this.config.site_id ? sites.filter(s => s.site_id === this.config.site_id) : sites)); return;
+    }
     if (this.config.mode === "overview") {
       const stack = element("div", null, "overview");
       for (const site of sites) stack.append(this.summary(site, true));
@@ -193,6 +327,7 @@ class MariaNetworkCard extends HTMLElement {
       root.append(stack); return;
     }
     if (!selected) { const card = element("ha-card", "Ожидаем данные филиала из MQTT."); root.append(card); return; }
+    if (this.config.mode === "history") {root.append(this.history(selected));return;}
     if (this.config.mode === "summary") { root.append(this.summary(selected, false)); return; }
     this.currentStale = selected.stale || !selected.monitor_available;
     const card = element("ha-card");

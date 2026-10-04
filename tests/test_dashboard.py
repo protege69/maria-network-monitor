@@ -109,7 +109,8 @@ class ModelTests(unittest.TestCase):
         site = next(iter(d.update_inventory({}, [result(False, [])])["sites"].values()))
         configs = list(d.discovery_configs(site, 180))
         self.assertEqual(len(configs), 4)
-        self.assertIn("availability_topic", configs[0][1])
+        self.assertNotIn("availability_topic", configs[0][1])
+        self.assertNotIn("expire_after", configs[0][1])
         self.assertEqual(configs[1][1]["availability_mode"], "all")
 
     def test_no_private_connection_data_in_dashboard_inventory(self):
@@ -140,7 +141,7 @@ class ExportTests(unittest.TestCase):
             text = (Path(tmp) / "maria-network-monitor.yaml").read_text(encoding="utf-8")
             config = json.loads(text.split("\n", 1)[1])
             self.assertEqual(config["title"], "Maria Network Monitor")
-            self.assertEqual(len(config["views"]), 2)
+            self.assertEqual(len(config["views"]), 3)
             self.assertNotIn('"gauge"', text)
 
     def test_new_metrics_publish_once_and_missing_metrics_do_not_remove(self):
@@ -214,6 +215,9 @@ class LegacyRegression(unittest.TestCase):
         self.assertTrue(output["ok"])
         self.assertEqual(len(output["devices"]), 1)
         self.assertEqual(output["devices"][0]["id"], "maria_020000000021")
+        self.assertEqual(output["diagnostics"]["leases_total"], 2)
+        self.assertEqual(output["diagnostics"]["static_total"], 1)
+        self.assertEqual(output["diagnostics"]["lan_source"], "explicit")
 
     def test_full_cycles_keep_inventory_on_outage_without_periodic_discovery(self):
         m = self.m
@@ -246,14 +250,41 @@ class LegacyRegression(unittest.TestCase):
         self.assertEqual(len(snapshots), 3)
         self.assertTrue(snapshots[1]["stale"])
         self.assertEqual(len(snapshots[1]["devices"]), 1)
-        self.assertEqual(snapshots[2]["devices"], [])
-        self.assertEqual(sum(topic.startswith("homeassistant/sensor/maria_dashboard_") for topic, payload in published), 4)
+        self.assertEqual(len(snapshots[2]["devices"]), 1)
+        self.assertTrue(snapshots[2]["inventory_pending"])
+        self.assertEqual(sum(topic.startswith("homeassistant/sensor/maria_dashboard_") for topic, payload in published), 5)
         online_config = "homeassistant/binary_sensor/maria_020000000001/online/config"
         self.assertEqual(sum(topic == online_config and bool(payload) for topic, payload in published), 1)
         failed_state_index = next(i for i, (topic, payload) in enumerate(published)
                                   if "/dashboard/" in topic and payload and topic.endswith("/state") and json.loads(payload)["stale"])
-        removal_index = next(i for i, (topic, payload) in enumerate(published) if topic == online_config and not payload)
-        self.assertGreater(removal_index, failed_state_index)
+        self.assertFalse(any(topic == online_config and not payload for topic, payload in published))
+
+
+    def test_router_errors_never_expose_login(self):
+        error = Exception("invalid user name or password /login password=synthetic-secret")
+        self.assertEqual(self.m.safe_router_error(error), "authentication_failed")
+        self.assertEqual(self.m.safe_router_error(TimeoutError()), "connection_timeout")
+        self.assertEqual(self.m.safe_router_error(Exception("synthetic-secret")), "router_api_error")
+
+    def test_mqtt_reconnect_requests_one_refresh(self):
+        import threading
+        client, event = Mock(), threading.Event()
+        self.m.configure_mqtt_recovery(client, event)
+        client.on_connect(client, None, {}, 5, None)
+        self.assertFalse(event.is_set())
+        client.on_connect(client, None, {}, 0, None)
+        self.assertTrue(event.is_set())
+        client.publish.assert_called_with(self.m.AVAILABILITY_TOPIC, "online", qos=1, retain=True)
+        event.clear()
+        client.on_connect(client, None, {}, 0, None)
+        self.assertTrue(event.is_set())
+
+    def test_single_ipp_reason_is_not_split_into_letters(self):
+        reason = "marker-waste-full-error"
+        self.assertEqual(self.m.normalize_reasons(reason), [reason])
+        health = d.printer_health(device(printer={"ipp": {"reasons": reason}}))
+        self.assertEqual(health["reasons"], [reason])
+        self.assertTrue(health["problem"])
 
 
 if __name__ == "__main__":

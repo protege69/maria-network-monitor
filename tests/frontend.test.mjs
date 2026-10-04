@@ -11,6 +11,7 @@ class Node {
   replaceChildren(...nodes) {this.children=nodes;this.ownText='';}
   setAttribute(name,value) {this.attrs[name]=String(value);}
   addEventListener(name,fn) {this.listeners[name]=fn;}
+  click() {this.clicked=true;}
 }
 globalThis.document={createElement:tag=>new Node(tag)};
 globalThis.HTMLElement=class extends Node {
@@ -30,6 +31,64 @@ const site=()=>({schema:1,maria_role:'site_inventory',site_id:'demo',name:'Demo 
     id:'maria_demo',online_unique_id:'maria_demo_online',name:'Demo PC',type:'computer',online:true}]});
 const hass=(item=site(),state='1')=>({states:{'sensor.renamed_inventory':{state,attributes:item}},callWS:async()=>[]});
 const allNodes=node=>[node,...node.children.flatMap(allNodes)];
+
+test('persistent snapshot becomes stale by timestamp without losing devices',()=>{
+  const data=site(); data.observed_at=new Date(Date.now()-3600000).toISOString(); data.freshness_seconds=180;
+  assert.equal(inventories(hass(data))[0].monitor_available,false);
+  assert.equal(inventories(hass(data))[0].devices.length,1);
+});
+
+test('daily report distinguishes measured pages from unknown and unallocated',()=>{
+  const data=site(),h=hass(data);
+  h.states['sensor.report']={state:'2026-10-01',attributes:{maria_role:'daily_report',site_id:'demo',timezone:'UTC',today:'2026-10-01',
+    generated_at:Date.now()/1000,days:[{date:'2026-10-01',pages:42,has_samples:true,rows:[
+      {id:'p1',name:'Printer A',pages:42,unallocated:8,flags:['boundary_gap']},
+      {id:'p2',name:'Printer B',pages:null,unallocated:0,flags:['no_samples']}]}]}};
+  const c=new Card();c.setConfig({mode:'report'});c.hass=h;
+  assert.match(c.shadowRoot.textContent,/42/);
+  assert.match(c.shadowRoot.textContent,/Нет данных/);
+  assert.match(c.shadowRoot.textContent,/8 стр. не распределено/);
+  assert.match(c.shadowRoot.textContent,/Скачать CSV/);
+});
+
+test('history graph resolves current entity id instead of deriving from names',async()=>{
+  const c=new Card(),data=site(),h=hass(data);
+  h.callWS=async()=>[{platform:'mqtt',unique_id:'maria_demo_online',entity_id:'binary_sensor.renamed'}];
+  let config;
+  window.loadCardHelpers=async()=>({createCardElement:cfg=>{config=cfg;return new Node('history-graph');}});
+  c.setConfig({mode:'history',site_id:'demo'});c.hass=h;
+  const button=allNodes(c.shadowRoot).find(n=>n.tag==='button'&&n.textContent.includes('Показать график'));
+  await button.listeners.click();
+  assert.deepEqual(config.entities,['binary_sensor.renamed']);
+  assert.equal(config.hours_to_show,24);
+  assert.equal(c.historyCard.hass,h);
+  delete window.loadCardHelpers;
+});
+
+test('history API failure is explained in the card',async()=>{
+  const c=new Card(),h=hass();h.callWS=async()=>{throw Error('not authorized');};
+  c.setConfig({mode:'history',site_id:'demo'});c.hass=h;
+  await allNodes(c.shadowRoot).find(n=>n.tag==='button'&&n.textContent.includes('Показать график')).listeners.click();
+  assert.match(c.shadowRoot.textContent,/История пока недоступна/);
+});
+
+test('CSV preserves unknown values and escapes formula-like device names',async()=>{
+  const h=hass(),c=new Card();let blob;
+  h.states['sensor.report']={state:'2026-10-01',attributes:{maria_role:'daily_report',site_id:'demo',timezone:'UTC',today:'2026-10-01',
+    generated_at:Date.now()/1000,days:[{date:'2026-10-01',pages:0,has_samples:false,rows:[
+      {id:'p',name:'=SUM(1,2)',pages:null,unallocated:0,flags:['no_samples']}]}]}};
+  const original=URL.createObjectURL;
+  URL.createObjectURL=value=>{blob=value;return 'blob:demo';};
+  try {
+    c.setConfig({mode:'report'});c.hass=h;
+    allNodes(c.shadowRoot).find(n=>n.tag==='button'&&n.textContent==='Скачать CSV').listeners.click();
+    const csv=await blob.text();
+    assert.match(csv,/'=SUM\(1,2\)/);
+    assert.match(csv,/"";"0"/);
+    assert.match(csv,/Нет показаний/);
+    assert.match(csv,/Часовой пояс/);
+  } finally {URL.createObjectURL=original;}
+});
 
 test('inventory selection ignores unrelated HA sensors and respects unavailability',()=>{
   const h=hass();h.states['sensor.other']={state:'1',attributes:{devices:[]}};

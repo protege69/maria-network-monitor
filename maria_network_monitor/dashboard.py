@@ -66,7 +66,8 @@ def printer_health(device):
         })
         if warning:
             alerts.append("low-toner")
-    reasons = [str(reason) for reason in ipp.get("reasons") or []]
+    raw_reasons = ipp.get("reasons") or []
+    reasons = [raw_reasons] if isinstance(raw_reasons, str) else [str(reason) for reason in raw_reasons]
     # Empty/none/idle/processing are not faults. IPP reports explicit severity.
     fault_reasons = [reason for reason in reasons if reason not in ("none", "other")
                     and (reason.endswith(("-warning", "-error")) or any(
@@ -116,20 +117,26 @@ def update_inventory(previous, results, observed_at=None):
                 if kind == "printer":
                     item["printer"] = printer_health(device)
                 devices.append(item)
+            for old_device in old.get("devices", []):
+                if old_device["id"] in result.get("pending_ids", set()):
+                    devices.append({**old_device, "stale": True, "pending_removal": True})
             # Stable identity ordering prevents churn; the frontend sorts by severity.
             devices = sorted({item["id"]: item for item in devices}.values(), key=lambda x: x["id"])
         else:
             devices = old.get("devices", [])
         online = sum(item["online"] for item in devices)
         problems = sum(bool(item.get("printer", {}).get("problem")) for item in devices)
+        current = result["ok"] and not result.get("pending_ids")
         snapshot["sites"][key] = {
             "schema": 1, "maria_role": "site_inventory", "site_id": key,
             "name": site["name"], "router_online": bool(result["ok"]),
-            "stale": not result["ok"], "observed_at": observed_at,
+            "stale": not current, "missing_polls": result.get("missing_polls", {}),
+            "inventory_pending": bool(result.get("pending_ids")),
+            "diagnostics": result.get("diagnostics", old.get("diagnostics", {})), "observed_at": observed_at,
             "last_success_at": observed_at if result["ok"] else old.get("last_success_at"),
-            "total": len(devices), "online": online if result["ok"] else None,
-            "offline": len(devices) - online if result["ok"] else None,
-            "printer_problems": problems if result["ok"] else None,
+            "total": len(devices), "online": online if current else None,
+            "offline": len(devices) - online if current else None,
+            "printer_problems": problems if current else None,
             "devices": devices,
         }
     return snapshot
@@ -153,6 +160,9 @@ def discovery_configs(site, expire_after):
         data = {**common, "unique_id": uid, "name": name,
                 "value_template": "{{ value_json." + ("total" if field == "inventory" else field) + " }}"}
         if field == "inventory":
+            # Snapshot must remain visible during monitor/broker outages and HA restart.
+            for option in ("availability_topic", "payload_available", "payload_not_available", "expire_after"):
+                data.pop(option, None)
             data["json_attributes_topic"] = topic
             data["entity_category"] = "diagnostic"
         else:
@@ -172,10 +182,16 @@ def dashboard_config(sites):
     views = [{"title": "Все филиалы", "path": "overview", "type": "sections", "max_columns": 3,
               "sections": [{"type": "grid", "column_span": 3, "cards": [{"type": "custom:maria-network-card",
                             "mode": "overview"}]}]}]
+    views.append({"title": "Отчёт за день", "path": "daily", "type": "sections", "max_columns": 3,
+                  "sections": [{"type": "grid", "column_span": 3, "cards": [
+                      {"type": "custom:maria-network-card", "mode": "report"}]}]})
     for site in sites:
         key = site_key(site["name"])
         sections = [{"type": "grid", "column_span": 2, "cards": [
             {"type": "custom:maria-network-card", "mode": "summary", "site_id": key}]}]
+        sections.append({"type": "grid", "column_span": 2, "cards": [
+            {"type": "custom:maria-network-card", "mode": "report", "site_id": key},
+            {"type": "custom:maria-network-card", "mode": "history", "site_id": key}]})
         for _, (group, label, icon) in GROUPS.items():
             sections.append({"type": "grid", "column_span": 2 if group == "printers" else 1, "cards": [
                 {"type": "custom:maria-network-card", "mode": "group", "site_id": key,

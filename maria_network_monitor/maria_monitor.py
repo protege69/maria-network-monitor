@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import asyncio
+import os
 import ipaddress
 import json
 import re
@@ -14,6 +15,9 @@ from pathlib import Path
 
 from dashboard import (NewPrinterDiscovery, discovery_configs, export_assets,
                        export_dashboard, site_key, update_inventory)
+
+from reports import update_reports, site_report, report_discovery
+from resilience import confirm_absences, RouterPoller, BoundedPublisher
 
 import paho.mqtt.client as mqtt
 import routeros_api
@@ -29,6 +33,8 @@ DISCOVERY_PREFIX = "homeassistant"
 MQTT_ROOT = "maria-monitor"
 AVAILABILITY_TOPIC = f"{MQTT_ROOT}/availability"
 
+REPORT_FILE = Path("/data/daily_reports.json")
+ROUTER_POLLER = None
 STOP = threading.Event()
 
 PRINTER_CACHE = {}
@@ -360,9 +366,7 @@ async def probe_ipp_async(ip):
                     printer.state.printer_state
                 ),
 
-                "reasons": list(
-                    printer.state.reasons or []
-                ),
+                "reasons": normalize_reasons(printer.state.reasons),
 
                 "accepting_jobs": (
                     printer.status.accepting_jobs
@@ -697,6 +701,7 @@ def normalize_printer_data(ipp, snmp):
     snmp = snmp or {}
 
     page_count = snmp.get("page_count")
+    page_count_source = "snmp" if page_count is not None else None
 
     if page_count is None:
         counters = ipp.get("counters") or {}
@@ -710,6 +715,7 @@ def normalize_printer_data(ipp, snmp):
 
             if isinstance(value, (int, float)) and value >= 0:
                 page_count = int(value)
+                page_count_source = "ipp:" + key
                 break
 
     markers = []
@@ -753,7 +759,7 @@ def normalize_printer_data(ipp, snmp):
             item["index"] = index
             markers.append(item)
 
-    reasons = ipp.get("reasons") or []
+    reasons = normalize_reasons(ipp.get("reasons"))
 
     accepting = ipp.get(
         "accepting_jobs"
@@ -764,6 +770,7 @@ def normalize_printer_data(ipp, snmp):
         "snmp": snmp,
 
         "page_count": page_count,
+        "page_count_source": page_count_source,
 
         "serial": (
             snmp.get("serial")
@@ -967,6 +974,9 @@ def enrich_printer_telemetry(
         )
         for field in ("ipp_observed_at", "snmp_observed_at", "ipp_fresh", "snmp_fresh"):
             device["printer"][field] = cache.get(field)
+        counter_source = device["printer"].get("page_count_source") or ""
+        device["printer"]["page_count_observed_at"] = cache.get(
+            "snmp_observed_at" if counter_source == "snmp" else "ipp_observed_at")
         # Last-good values survive failures; freshness is independent of value.
         device["printer"]["ipp_fresh"] = bool(
             device.get("online") and cache.get("ipp_fresh")
@@ -1085,6 +1095,37 @@ def classify_device(name, hostname, ports):
     return "unknown"
 
 
+def normalize_reasons(value):
+    return [value] if isinstance(value, str) else list(value or [])
+
+
+def safe_router_error(exc):
+    # RouterOS exceptions may embed the entire login command, including password.
+    text = str(exc).lower()
+    if "invalid user" in text or "password" in text or "login" in text:
+        return "authentication_failed"
+    if isinstance(exc, TimeoutError) or "timed out" in text:
+        return "connection_timeout"
+    if isinstance(exc, OSError):
+        return "network_error"
+    if isinstance(exc, ValueError):
+        return "invalid_configuration_or_response"
+    return "router_api_error"
+
+
+def configure_mqtt_recovery(client, refresh):
+    def connected(client, userdata, flags, reason_code, properties):
+        if reason_code == 0:
+            client.publish(AVAILABILITY_TOPIC, "online", qos=1, retain=True)
+            client.subscribe("homeassistant/status", qos=1)
+            refresh.set()
+    def message(client, userdata, message):
+        if message.topic == "homeassistant/status" and message.payload == b"online":
+            refresh.set()
+    client.on_message = message
+    client.on_connect = connected
+
+
 def collect_router(site, username, password):
     pool = None
 
@@ -1097,6 +1138,7 @@ def collect_router(site, username, password):
             plaintext_login=True,
         )
 
+        pool.set_timeout(10.0)
         api = pool.get_api()
 
         identity = (
@@ -1147,6 +1189,10 @@ def collect_router(site, username, password):
             if row.get("address")
         }
 
+        diagnostics = {"leases_total": len(leases), "static_total": 0,
+                       "skipped_no_ip": 0, "skipped_outside_lan": 0,
+                       "skipped_invalid_ip": 0, "skipped_no_mac": 0,
+                       "lan_source": "explicit" if explicit_lan else "automatic"}
         devices = []
 
         for lease in leases:
@@ -1166,9 +1212,11 @@ def collect_router(site, username, password):
             ):
                 continue
 
+            diagnostics["static_total"] += 1
             ip = lease.get("address")
 
             if not ip:
+                diagnostics["skipped_no_ip"] += 1
                 continue
 
             # Lease должен принадлежать LAN
@@ -1180,8 +1228,10 @@ def collect_router(site, username, password):
                         ipaddress.ip_address(ip)
                         not in ipaddress.ip_network(lan)
                     ):
+                        diagnostics["skipped_outside_lan"] += 1
                         continue
                 except ValueError:
+                    diagnostics["skipped_invalid_ip"] += 1
                     continue
 
             arp_row = arp_by_ip.get(
@@ -1203,6 +1253,7 @@ def collect_router(site, username, password):
             # Без него устройство пока не создаём.
 
             if not mac:
+                diagnostics["skipped_no_mac"] += 1
                 continue
 
             comment = (
@@ -1255,6 +1306,7 @@ def collect_router(site, username, password):
             "identity": identity,
             "lan": lan,
             "devices": devices,
+            "diagnostics": diagnostics,
         }
 
     except Exception as exc:
@@ -1265,7 +1317,7 @@ def collect_router(site, username, password):
             "identity": None,
             "lan": None,
             "devices": [],
-            "error": str(exc),
+            "error": safe_router_error(exc),
         }
 
     finally:
@@ -1284,58 +1336,11 @@ def collect_all_routers(
     username,
     password,
 ):
-    results = []
+    global ROUTER_POLLER
+    if ROUTER_POLLER is None:
+        ROUTER_POLLER = RouterPoller()
+    return ROUTER_POLLER.collect(sites, collect_router, username, password)
 
-    with ThreadPoolExecutor(
-        max_workers=min(
-            8,
-            len(sites),
-        )
-    ) as executor:
-
-        jobs = {
-            executor.submit(
-                collect_router,
-                site,
-                username,
-                password,
-            ): site
-            for site in sites
-        }
-
-        for future in as_completed(jobs):
-
-            site = jobs[future]
-
-            try:
-                results.append(
-                    future.result()
-                )
-
-            except Exception as exc:
-                results.append(
-                    {
-                        "ok": False,
-                        "site": site,
-                        "devices": [],
-                        "error": str(exc),
-                    }
-                )
-
-    order = {
-        site["name"]: index
-        for index, site
-        in enumerate(sites)
-    }
-
-    results.sort(
-        key=lambda x: order.get(
-            x["site"]["name"],
-            999,
-        )
-    )
-
-    return results
 
 
 def enrich_devices(devices):
@@ -2342,6 +2347,14 @@ def main():
 
     dashboard_enabled = bool(options.get("dashboard_enabled", True))
     inventory = load_json(INVENTORY_FILE, {"sites": {}}) or {"sites": {}}
+    report_timezone = options.get("report_timezone") or os.environ.get("TZ") or "UTC"
+    try:
+        report_state = load_json(REPORT_FILE, {}) or {}
+        # Never silently relabel old daily buckets or overwrite corrupt report files.
+        update_reports(report_state, [], report_timezone)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        report_state = None
+        log("Daily reports disabled: check ledger integrity and report_timezone; monitoring continues")
     dashboard_topics = set()
     printer_topics = set()
     if dashboard_enabled:
@@ -2423,6 +2436,10 @@ def main():
         ),
     )
 
+    mqtt_refresh = threading.Event()
+    configure_mqtt_recovery(client, mqtt_refresh)
+    client = BoundedPublisher(client, mqtt_refresh, mqtt.MQTT_ERR_QUEUE_SIZE)
+
     client.username_pw_set(
         options["mqtt_username"],
         options["mqtt_password"],
@@ -2470,8 +2487,12 @@ def main():
                 for topic, _ in discovery_configs(old_site, expire_after):
                     client.publish(topic, "", qos=1, retain=True)
                 client.publish(f"{MQTT_ROOT}/dashboard/{old_key}/state", "", qos=1, retain=True)
+                report_topic, _ = report_discovery(old_site)
+                client.publish(report_topic, "", qos=1, retain=True)
+                client.publish(f"{MQTT_ROOT}/reports/{old_key}/state", "", qos=1, retain=True)
 
     last_discovery = 0.0
+    recovery_sites = {site["name"] for site in sites}
 
     log(
         "Maria Network Monitor started"
@@ -2479,12 +2500,20 @@ def main():
 
     while not STOP.is_set():
 
+        if mqtt_refresh.is_set() and client.is_connected():
+            mqtt_refresh.clear()
+            last_discovery = 0.0
+            recovery_sites = {site["name"] for site in sites}
+            printer_topics.clear()
+            dashboard_topics.clear()
+            publish_monitor_discovery(client, expire_after)
+
         cycle_started = (
             time.monotonic()
         )
 
         do_discovery = (
-            last_discovery == 0
+            bool(recovery_sites) or last_discovery == 0
             or (
                 cycle_started
                 - last_discovery
@@ -2505,6 +2534,8 @@ def main():
                 "mikrotik_password"
             ],
         )
+
+        confirm_absences(inventory, results)
 
         devices = [
             device
@@ -2590,6 +2621,8 @@ def main():
                     )
                 )
 
+                current_ids.update(result.get("pending_ids", set()))
+
                 added_ids = (
                     current_ids
                     - previous_ids
@@ -2605,7 +2638,7 @@ def main():
                     # Во время работы Discovery публикуем
                     # только для новых static DHCP leases.
                     if (
-                        first_discovery
+                        site_name in recovery_sites
                         or device["id"] in added_ids
                     ):
 
@@ -2650,6 +2683,8 @@ def main():
                 ] = sorted(
                     current_ids
                 )
+                if not result.get("pending_ids"):
+                    recovery_sites.discard(site_name)
 
             save_json(
                 KNOWN_FILE,
@@ -2689,12 +2724,30 @@ def main():
 
         # This layer never controls existing discovery topics or HA dashboards.
         inventory = update_inventory(inventory, results)
+        for saved_site in inventory["sites"].values():
+            saved_site["router_unique_id"] = "maria_router_" + site_slug(saved_site["name"]) + "_online"
+        if report_state is not None:
+            update_reports(report_state, devices, report_timezone)
+            try:
+                report_state["persistence_ok"] = True
+                save_json(REPORT_FILE, report_state)
+            except OSError:
+                report_state["persistence_ok"] = False
+                log("Daily report persistence failed; current report may not survive restart")
         try:
             save_json(INVENTORY_FILE, inventory)
         except OSError as exc:
             log("Inventory save failed; monitoring continues: " + str(exc))
         if dashboard_enabled:
             for saved_site in inventory["sites"].values():
+                saved_site["freshness_seconds"] = max(180, state_interval * 3)
+                if report_state is not None:
+                    report = site_report(report_state, saved_site, stale_after=max(1800, printer_snmp_interval * 3))
+                    report_topic, config = report_discovery(saved_site)
+                    if report_topic not in dashboard_topics:
+                        mqtt_json(client, report_topic, config)
+                        dashboard_topics.add(report_topic)
+                    mqtt_json(client, f"{MQTT_ROOT}/reports/{saved_site['site_id']}/state", report)
                 for topic, config in discovery_configs(saved_site, expire_after):
                     if topic not in dashboard_topics:
                         mqtt_json(client, topic, config)
@@ -2746,7 +2799,7 @@ def main():
                     f"{site_name}: "
                     f"API OK, "
                     f"{len(result['devices'])} "
-                    f"static"
+                    f"accepted static; filters={result.get('diagnostics', {})}"
                 )
 
             else:
@@ -2813,6 +2866,8 @@ def main():
 
     client.disconnect()
     client.loop_stop()
+    if ROUTER_POLLER is not None:
+        ROUTER_POLLER.close()
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 name: "Maria Network Monitor"
-version: "1.3.0"
+version: "1.4.0"
 slug: "maria_network_monitor"
 description: "MikroTik static DHCP monitoring and printer telemetry via MQTT Discovery"
 
@@ -25,6 +25,7 @@ privileged:
 
 options:
   dashboard_enabled: true
+  report_timezone: ""
   mikrotik_username: "HA_READ"
   mikrotik_password: null
 
@@ -45,6 +46,7 @@ options:
 
 schema:
   dashboard_enabled: "bool?"
+  report_timezone: "str?"
   mikrotik_username: str
   mikrotik_password: password
 

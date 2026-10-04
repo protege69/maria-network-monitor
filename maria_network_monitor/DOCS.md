@@ -1,10 +1,10 @@
 # Maria Network Monitor — configuration
 
-## Automatic dashboard (1.3.0)
+## Automatic dashboard (1.4.0)
 
 See [DASHBOARD.md](DASHBOARD.md) for one-time connection, automatic device updates, mobile layout, ownership guarantees and fallback YAML. `dashboard_enabled` defaults to `true`; setting it to `false` leaves legacy monitoring active and stops dashboard publication/export. Existing registered dashboards are not deleted.
 
-See [../ARCHITECTURE.md](../ARCHITECTURE.md) for data quality and the future reporting architecture. The current page count is a lifetime reading, not a daily report.
+See [REPORTS.md](REPORTS.md) for daily reports, history, quality rules and the 1.4.0 upgrade. Lifetime page counters remain separate from daily measured deltas.
 
 ## What it does
 

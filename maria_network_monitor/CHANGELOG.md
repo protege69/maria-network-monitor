@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.4.0
+
+- Added persistent daily print reports by site/device, a dashboard date selector, seven-day bars, 90-day retention and CSV export. Counts are deltas from actual sample timestamps; cached samples never count twice.
+- Added explicit data-quality flags for first observation, counter reset, source changes, missing samples and incomplete days. Cross-midnight deltas are recorded separately, without invented daily allocation.
+- Added visible History cards using native Home Assistant history graphs, current registry entity IDs and links to more-info for other dates.
+- Keep retained inventory visible during monitor outages; frontend freshness expires independently every 30 seconds.
+- Confirm missing leases over three successful polls; failures reset the absence streak and preserve devices.
+- Bound router collection waiting to 20 seconds per cycle, reuse outstanding jobs and back off failing routers up to five minutes. Set RouterOS socket timeout to ten seconds.
+- Bound MQTT queued messages to 256, retry Discovery after queue rejection, recover on HA birth, and retain per-site rediscovery until routers recover.
+- Preserve legacy entity IDs, printer cache, user dashboards and all 1.3.1 fixes.
+
+
+## 1.3.1
+
+- Restore online availability and republish Discovery after successful MQTT reconnect, using a main-thread event; stable IDs and normal no-flapping behavior are preserved.
+- Replace RouterOS exception text with safe error categories so login commands cannot leak into logs or MQTT.
+- Normalize single IPP reason strings before caching, MQTT formatting and dashboard health evaluation.
+- Report total leases, static leases and exclusion counts instead of presenting filtered count as the router's entire static inventory.
+- Document remaining outage/history limitations and deployment verification in REVIEW.md.
+
+
 ## 1.3.0
 
 - Explicitly group SIP/SIPS phones under VoIP, using name/hostname hints and TCP 5060/5061 where available; PBX registration status is not inferred from reachability.

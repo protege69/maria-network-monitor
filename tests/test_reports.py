@@ -116,7 +116,9 @@ class ResilienceTests(unittest.TestCase):
             if site['name'] == 'Slow':
                 release.wait(2)
             return {'ok': True, 'site': site, 'devices': []}
-        poller = RouterPoller(budget=.02)
+        # This test checks concurrent job reuse, not wall-clock expiry. Avoid
+        # marking the healthy result stale under a busy Windows scheduler.
+        poller = RouterPoller(budget=.2, clock=lambda: 0)
         sites = [{'name': 'Slow'}, {'name': 'Fast'}]
         try:
             results = poller.collect(sites, collect, '', '')

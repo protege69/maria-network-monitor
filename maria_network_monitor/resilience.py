@@ -6,20 +6,45 @@ from dashboard import site_key
 
 
 class BoundedPublisher:
-    """Bound Paho's QoS queue; retry Discovery on the next connected cycle if full."""
-    def __init__(self, client, refresh, queue_full_code):
+    """Bound memory and apply bounded backpressure instead of dropping each burst.
+
+    Paho's network thread drains the queue while the main thread waits. The
+    total wait budget is shared by the entire polling cycle, including outages.
+    """
+    def __init__(self, client, refresh, queue_full_code, clock=time.monotonic):
         self.client = client
         self.refresh = refresh
         self.queue_full_code = queue_full_code
+        self.clock = clock
+        self.last_accepted = None
+        self.begin_cycle()
         client.max_queued_messages_set(256)
+
+    def begin_cycle(self):
+        self.wait_budget = 2.0
 
     def __getattr__(self, name):
         return getattr(self.client, name)
 
     def publish(self, *args, **kwargs):
         result = self.client.publish(*args, **kwargs)
+        if (result.rc == self.queue_full_code and self.last_accepted is not None
+                and self.wait_budget > 0 and self.client.is_connected()):
+            started = self.clock()
+            timeout = min(0.5, self.wait_budget)
+            try:
+                self.last_accepted.wait_for_publish(timeout=timeout)
+            except (RuntimeError, ValueError):
+                pass
+            finally:
+                # Charge at least the requested timeout: bound retries even
+                # if wait_for_publish returns immediately on a broken message.
+                self.wait_budget -= max(timeout, self.clock() - started)
+            result = self.client.publish(*args, **kwargs)
         if result.rc == self.queue_full_code:
             self.refresh.set()
+        elif result.rc == 0:
+            self.last_accepted = result
         return result
 
 

@@ -1,5 +1,5 @@
 name: "Maria Network Monitor"
-version: "1.4.0"
+version: "1.4.1"
 slug: "maria_network_monitor"
 description: "MikroTik static DHCP monitoring and printer telemetry via MQTT Discovery"
 

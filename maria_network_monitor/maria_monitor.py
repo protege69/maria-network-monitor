@@ -2500,6 +2500,7 @@ def main():
 
     while not STOP.is_set():
 
+        client.begin_cycle()
         if mqtt_refresh.is_set() and client.is_connected():
             mqtt_refresh.clear()
             last_discovery = 0.0

@@ -1,3 +1,7 @@
+## 1.4.1
+
+- Fix MQTT queue saturation during large Discovery bursts: wait briefly for acknowledgements and retry the rejected publication before requesting rediscovery. Keep the 256-message memory limit and a two-second wait budget per polling cycle. This prevents repeated Discovery from starving dashboard and daily-report states on a healthy broker.
+
 # Changelog
 
 ## 1.4.0
